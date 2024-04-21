@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Data.SqlClient;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Reflection.Emit;
 
 namespace DistributedQueryLibrary
 {
@@ -15,9 +16,13 @@ namespace DistributedQueryLibrary
         public int TotalLinesAffected { get; private set; }
         public static int Timeout { get; set; }
 
+        public string ErrorMessage { get; set; }
+
         private string _noServerFoundMessage = "Não há servidores selecionados.";
         private string _userCancelledMessage = "Cancelada pelo usuário.";
         private string _queryErrorMessage = "Falha ao executar a consulta.";
+
+        private string _messageSeparator = "-";
 
         public DistributedQueryExecutor(int timeout)
         {
@@ -35,35 +40,39 @@ namespace DistributedQueryLibrary
             int totalServers = servers.Count();
 
             if (servers.Count == 0)
-                throw new Exception(_noServerFoundMessage);
+                ErrorMessage = _noServerFoundMessage;
 
-            Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = 100 }, server =>
+            Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = 10 }, server =>
             {
+                DataTable table = null;
+
                 step++;
                 try
                 {
-                    DataTable table = ExecuteQuery(query, server, queryWorker);
+                    if (queryWorker.CancellationPending)
+                        throw new Exception(_userCancelledMessage);
 
-                    if (table != null)
-                    { 
-                        if (addServerName)
+                    table = ExecuteQuery(query, server);
+ 
+                    if (addServerName)
+                    {
+                        DataColumn serverColumn = new DataColumn
                         {
-                            DataColumn serverColumn = new DataColumn
-                            {
-                                ColumnName = "SERVIDOR",
-                                DataType = server.GetType(),
-                                DefaultValue = server
-                            };
-                            table.Columns.Add(serverColumn);
-                        }
-                        resultsTableList.Add(table);
+                            ColumnName = "SERVIDOR",
+                            DataType = server.GetType(),
+                            DefaultValue = server
+                        };
+                        table?.Columns.Add(serverColumn);
                     }
+                    resultsTableList.Add(table);
+                    
                 }
                 catch (Exception exception)
                 {
-                    string erroMessage = exception.Message;
-                    if (exception.InnerException != null)
-                        erroMessage += " -> " + exception.InnerException.Message;                    
+                    table = null;
+                    ErrorMessage += String.Concat(_queryErrorMessage, _messageSeparator,
+                                                  exception.Message, _messageSeparator,
+                                                  server, Environment.NewLine);
                 }
                 finally
                 {
@@ -71,65 +80,48 @@ namespace DistributedQueryLibrary
                 }
             });
 
-            foreach (DataTable table in resultsTableList)
-            {
-                tableResults.Merge(table);
-            }
+            resultsTableList.RemoveAll(table => table == null);
+
+            if (resultsTableList.Count < servers.Count)
+                return DistributeQuery(queryWorker, query, servers);
+
+            resultsTableList.ForEach(table => tableResults.Merge(table));
+
             return tableResults;
         }
 
-        private DataTable ExecuteQuery(string query, string server, BackgroundWorker queryWorker)
+        private DataTable ExecuteQuery(string query, string server)
         {
             DataTable table = new DataTable { Locale = System.Globalization.CultureInfo.InvariantCulture };
             SqlDataReader dataReader;
             int linesCount = -1;
 
-            try
+            _connectionString = $"{_credentials};Data Source={server};Connect Timeout={Timeout}";
+
+            SqlConnection connection = new SqlConnection(_connectionString);
+            SqlCommand command = new SqlCommand(query, connection)
             {
-                _connectionString = $"{_credentials};Data Source={server};Connect Timeout={Timeout}";
+                CommandTimeout = Timeout
+            };
 
-                //Apply using here?
-                SqlConnection connection = new SqlConnection(_connectionString);
-                SqlCommand command = new SqlCommand(query, connection)
-                {
-                    CommandTimeout = Timeout
-                };
+            connection.Open();
+            dataReader = command.ExecuteReader(CommandBehavior.CloseConnection);
+            table.Load(dataReader);
+            dataReader.Close();
 
-                if (queryWorker.CancellationPending)
-                    throw new Exception(_userCancelledMessage);
+            int linesRetrieved = table.Rows.Count;
+            int linesModified = dataReader.RecordsAffected;
 
-                connection.Open();
-                dataReader = command.ExecuteReader(CommandBehavior.CloseConnection);
-                table.Load(dataReader);
-                dataReader.Close();
+            linesCount = Math.Max(0, linesModified) + Math.Max(0, linesRetrieved);
 
-                int linesRetrieved = table.Rows.Count;
-                int linesModified = dataReader.RecordsAffected;
+            TotalLinesAffected += linesCount;
 
-                linesCount = Math.Max(0, linesModified) + Math.Max(0, linesRetrieved);
-
-                TotalLinesAffected += linesCount;
-
-                if (table != null && table.Rows != null)
-                {
-                    if (table.Rows.Count < 0)
-                        table.Rows.Add();
-                }
-                else
-                {
-                    throw new Exception(_queryErrorMessage);
-                }
-            }
-            catch
-            {
+            if (table?.Rows?.Count < 0)
+                table?.Rows?.Add();
+            
+            if (linesCount <= 0)
                 table = null;
-            }
-            finally
-            {
-                if (linesCount <= 0)
-                    table = null;
-            }
-
+            
             return table;
         }
     }
