@@ -5,52 +5,57 @@ using System.ComponentModel;
 using System.Data.SqlClient;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Reflection.Emit;
 
 namespace DistributedQueryLibrary
 {
     public class DistributedQueryExecutor
     {     
+        private object _locker;
         private string _connectionString;
-        private readonly string _credentials;
+
+        private readonly string _noServerFoundMessage = "Não há servidores selecionados.";
+        private readonly string _userCancelledMessage = "Cancelada pelo usuário.";
+        private readonly string _queryErrorMessage = "Falha ao executar a consulta.";
+
+        private readonly string _messageSeparator = " ";
+        
+        public string Credentials { private get; set; }
+
         public int TotalLinesAffected { get; private set; }
+        public string ErrorMessage { get; set; }
         public static int Timeout { get; set; }
 
-        public string ErrorMessage { get; set; }
+        public int MaxDegreeOfParallelism { get; private set; }
 
-        private string _noServerFoundMessage = "Não há servidores selecionados.";
-        private string _userCancelledMessage = "Cancelada pelo usuário.";
-        private string _queryErrorMessage = "Falha ao executar a consulta.";
-
-        private string _messageSeparator = "-";
-
-        public DistributedQueryExecutor(int timeout)
+        public DistributedQueryExecutor(int timeout, int maxDegreeOfParallelism)
         {
-            _credentials = "Integrated Security = true";
+            MaxDegreeOfParallelism = maxDegreeOfParallelism;
+            Credentials = "Integrated Security = true";
             Timeout = timeout;
+            _locker = new object();
         }
 
         public DataTable DistributeQuery(BackgroundWorker queryWorker, string query, List<string> servers, bool addServerName = false)
         {
+            ErrorMessage = String.Empty;
             var tableResults = new DataTable();
-            List<DataTable> resultsTableList = new List<DataTable>();
 
-            int step = 0;
+            int step = 1;
             TotalLinesAffected = 0;
             int totalServers = servers.Count();
 
             if (servers.Count == 0)
                 ErrorMessage = _noServerFoundMessage;
 
-            Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = 10 }, server =>
+            Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = this.MaxDegreeOfParallelism }, server =>
             {
                 DataTable table = null;
+                string errorMessage = default;
 
-                step++;
                 try
                 {
                     if (queryWorker.CancellationPending)
-                        throw new Exception(_userCancelledMessage);
+                        throw new OperationCanceledException();
 
                     table = ExecuteQuery(query, server);
  
@@ -64,45 +69,39 @@ namespace DistributedQueryLibrary
                         };
                         table?.Columns.Add(serverColumn);
                     }
-                    resultsTableList.Add(table);
                     
                 }
                 catch (Exception exception)
                 {
-                    table = null;
-                    ErrorMessage += String.Concat(_queryErrorMessage, _messageSeparator,
+                    errorMessage = String.Concat(_queryErrorMessage, _messageSeparator,
                                                   exception.Message, _messageSeparator,
                                                   server, Environment.NewLine);
                 }
                 finally
                 {
+                    lock (_locker) 
+                    { 
+                        step++;
+                        tableResults.Merge(table ?? new DataTable());
+                        ErrorMessage += errorMessage;
+                    }
                     queryWorker.ReportProgress(step * 100 / totalServers);
                 }
             });
 
-            resultsTableList.RemoveAll(table => table == null);
-
-            if (resultsTableList.Count < servers.Count)
-                return DistributeQuery(queryWorker, query, servers);
-
-            resultsTableList.ForEach(table => tableResults.Merge(table));
-
             return tableResults;
         }
 
-        private DataTable ExecuteQuery(string query, string server)
+        public DataTable ExecuteQuery(string query, string server)
         {
             DataTable table = new DataTable { Locale = System.Globalization.CultureInfo.InvariantCulture };
             SqlDataReader dataReader;
-            int linesCount = -1;
+            int linesCount;
 
-            _connectionString = $"{_credentials};Data Source={server};Connect Timeout={Timeout}";
+            _connectionString = $"{Credentials};Data Source={server};Connect Timeout={Timeout}";
 
             SqlConnection connection = new SqlConnection(_connectionString);
-            SqlCommand command = new SqlCommand(query, connection)
-            {
-                CommandTimeout = Timeout
-            };
+            SqlCommand command = new SqlCommand(query, connection) { CommandTimeout = Timeout };
 
             connection.Open();
             dataReader = command.ExecuteReader(CommandBehavior.CloseConnection);
@@ -116,11 +115,8 @@ namespace DistributedQueryLibrary
 
             TotalLinesAffected += linesCount;
 
-            if (table?.Rows?.Count < 0)
-                table?.Rows?.Add();
-            
-            if (linesCount <= 0)
-                table = null;
+            if (table.Rows.Count < 0)
+                table.Rows.Add();
             
             return table;
         }
