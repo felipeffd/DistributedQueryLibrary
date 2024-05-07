@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Data.SqlClient;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace DistributedQueryLibrary
 {
@@ -16,15 +17,13 @@ namespace DistributedQueryLibrary
         private readonly string _noServerFoundMessage = "Não há servidores selecionados.";
         private readonly string _userCancelledMessage = "Cancelada pelo usuário.";
         private readonly string _queryErrorMessage = "Falha ao executar a consulta.";
+        private readonly string _linesAffectedMessage = " linhas afetada(s) em: ";
 
-        private readonly string _messageSeparator = " ";
-        
+        private readonly string _messageSeparator = " ";        
         public string Credentials { private get; set; }
-
         public int TotalLinesAffected { get; private set; }
-        public string ErrorMessage { get; set; }
-        public static int Timeout { get; set; }
-
+        public List<string> Messages { get; private set; }
+        public static int Timeout { get; private set; }
         public int MaxDegreeOfParallelism { get; private set; }
 
         public DistributedQueryExecutor(int timeout, int maxDegreeOfParallelism)
@@ -37,7 +36,9 @@ namespace DistributedQueryLibrary
 
         public DataTable DistributeQuery(BackgroundWorker queryWorker, string query, List<string> servers, bool addServerName = false)
         {
-            ErrorMessage = String.Empty;
+
+            Messages = new List<string>();
+
             var tableResults = new DataTable();
 
             int step = 1;
@@ -45,21 +46,22 @@ namespace DistributedQueryLibrary
             int totalServers = servers.Count();
 
             if (servers.Count == 0)
-                ErrorMessage = _noServerFoundMessage;
+                Messages.Add(_noServerFoundMessage);
 
             Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = this.MaxDegreeOfParallelism }, server =>
             {
-                DataTable table = null;
-                string errorMessage = default;
+                string localMessage = default;
+                (DataTable table, int linesAffected) localTable = default;
 
                 try
                 {
-                    if (queryWorker.CancellationPending)
-                        throw new OperationCanceledException();
+                    if (queryWorker != null)
+                        if (queryWorker.CancellationPending)
+                            throw new OperationCanceledException(_userCancelledMessage);
 
-                    table = ExecuteQuery(query, server);
- 
-                    if (addServerName)
+                    localTable = ExecuteQuery(query, server);
+
+                    if (addServerName && localTable.table.Rows.Count > 0)
                     {
                         DataColumn serverColumn = new DataColumn
                         {
@@ -67,58 +69,50 @@ namespace DistributedQueryLibrary
                             DataType = server.GetType(),
                             DefaultValue = server
                         };
-                        table?.Columns.Add(serverColumn);
+                        localTable.table?.Columns.Add(serverColumn);
                     }
-                    
+                    localMessage = String.Concat(localTable.linesAffected, _linesAffectedMessage);
                 }
                 catch (Exception exception)
                 {
-                    errorMessage = String.Concat(_queryErrorMessage, _messageSeparator,
-                                                  exception.Message, _messageSeparator,
-                                                  server, Environment.NewLine);
+                    localMessage = String.Concat(_queryErrorMessage, _messageSeparator,
+                                                  exception.Message, _messageSeparator);
                 }
                 finally
                 {
-                    lock (_locker) 
+                    lock (_locker)
                     { 
                         step++;
-                        tableResults.Merge(table ?? new DataTable());
-                        ErrorMessage += errorMessage;
+                        TotalLinesAffected += localTable.linesAffected;
+                        tableResults.Merge(localTable.table ?? new DataTable());
+                        Messages.Add(String.Concat(localMessage, server, Environment.NewLine));
                     }
-                    queryWorker.ReportProgress(step * 100 / totalServers);
+                    queryWorker?.ReportProgress(step * 100 / totalServers);
                 }
             });
 
             return tableResults;
         }
 
-        public DataTable ExecuteQuery(string query, string server)
+        public (DataTable table, int linesAffected) ExecuteQuery(string query, string server)
         {
             DataTable table = new DataTable { Locale = System.Globalization.CultureInfo.InvariantCulture };
-            SqlDataReader dataReader;
-            int linesCount;
-
             _connectionString = $"{Credentials};Data Source={server};Connect Timeout={Timeout}";
 
             SqlConnection connection = new SqlConnection(_connectionString);
             SqlCommand command = new SqlCommand(query, connection) { CommandTimeout = Timeout };
 
             connection.Open();
-            dataReader = command.ExecuteReader(CommandBehavior.CloseConnection);
+            SqlDataReader dataReader = command.ExecuteReader(CommandBehavior.CloseConnection);
             table.Load(dataReader);
             dataReader.Close();
 
             int linesRetrieved = table.Rows.Count;
             int linesModified = dataReader.RecordsAffected;
 
-            linesCount = Math.Max(0, linesModified) + Math.Max(0, linesRetrieved);
+            int linesAffected = Math.Max(0, linesModified) + Math.Max(0, linesRetrieved);
 
-            TotalLinesAffected += linesCount;
-
-            if (table.Rows.Count < 0)
-                table.Rows.Add();
-            
-            return table;
+            return (table, linesAffected);
         }
     }
 }
