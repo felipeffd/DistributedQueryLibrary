@@ -5,24 +5,20 @@ using System.ComponentModel;
 using System.Data.SqlClient;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Threading;
 
 namespace DistributedQueryLibrary
 {
     public class DistributedQueryExecutor
     {     
-        private object _locker;
-        private string _connectionString;
+        private readonly object _locker;
 
         private readonly string _noServerFoundMessage = "Não há servidores selecionados.";
         private readonly string _userCancelledMessage = "Cancelada pelo usuário.";
-        private readonly string _queryErrorMessage = "Falha ao executar a consulta.";
+        private readonly string _queryErrorMessage = "Falha ao executar a consulta: ";
         private readonly string _linesAffectedMessage = " linhas afetada(s) em: ";
-
-        private readonly string _messageSeparator = " ";        
         public string Credentials { private get; set; }
         public int TotalLinesAffected { get; private set; }
-        public List<string> Messages { get; private set; }
+        public List<QueryLog> Messages { get; private set; }
         public static int Timeout { get; private set; }
         public int MaxDegreeOfParallelism { get; private set; }
 
@@ -36,17 +32,14 @@ namespace DistributedQueryLibrary
 
         public DataTable DistributeQuery(BackgroundWorker queryWorker, string query, List<string> servers, bool addServerName = false)
         {
+            int step = 0;
+            TotalLinesAffected = 0;
 
-            Messages = new List<string>();
-
+            Messages = new List<QueryLog>();
             var tableResults = new DataTable();
 
-            int step = 1;
-            TotalLinesAffected = 0;
-            int totalServers = servers.Count();
-
             if (servers.Count == 0)
-                Messages.Add(_noServerFoundMessage);
+                Messages.Add(new QueryLog(_noServerFoundMessage, String.Empty, DateTime.Now));
 
             Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = this.MaxDegreeOfParallelism }, server =>
             {
@@ -75,8 +68,7 @@ namespace DistributedQueryLibrary
                 }
                 catch (Exception exception)
                 {
-                    localMessage = String.Concat(_queryErrorMessage, _messageSeparator,
-                                                  exception.Message, _messageSeparator);
+                    localMessage = String.Concat(_queryErrorMessage, exception.Message);
                 }
                 finally
                 {
@@ -84,10 +76,10 @@ namespace DistributedQueryLibrary
                     { 
                         step++;
                         TotalLinesAffected += localTable.linesAffected;
+                        Messages.Add(new QueryLog(localMessage, server, DateTime.Now));
                         tableResults.Merge(localTable.table ?? new DataTable());
-                        Messages.Add(String.Concat(localMessage, server, Environment.NewLine));
+                        queryWorker?.ReportProgress(step * 100 / servers.Count());
                     }
-                    queryWorker?.ReportProgress(step * 100 / totalServers);
                 }
             });
 
@@ -97,7 +89,7 @@ namespace DistributedQueryLibrary
         public (DataTable table, int linesAffected) ExecuteQuery(string query, string server)
         {
             DataTable table = new DataTable { Locale = System.Globalization.CultureInfo.InvariantCulture };
-            _connectionString = $"{Credentials};Data Source={server};Connect Timeout={Timeout}";
+            string _connectionString = $"{Credentials};Data Source={server};Connect Timeout={Timeout}";
 
             SqlConnection connection = new SqlConnection(_connectionString);
             SqlCommand command = new SqlCommand(query, connection) { CommandTimeout = Timeout };
