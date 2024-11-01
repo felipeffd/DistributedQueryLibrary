@@ -19,8 +19,8 @@ namespace DistributedQueryLibrary
         public string Credentials { private get; set; }
         public int TotalLinesAffected { get; private set; }
         public List<QueryLog> Messages { get; private set; }
-        public static int Timeout { get; private set; }
         public int MaxDegreeOfParallelism { get; private set; }
+        public static int Timeout { get; private set; }
 
         public DistributedQueryExecutor(int timeout, int maxDegreeOfParallelism)
         {
