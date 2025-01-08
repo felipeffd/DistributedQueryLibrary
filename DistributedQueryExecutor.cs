@@ -43,6 +43,7 @@ namespace DistributedQueryLibrary
 
             Parallel.ForEach(servers, new ParallelOptions { MaxDegreeOfParallelism = this.MaxDegreeOfParallelism }, server =>
             {
+                bool isSuccessful = true;
                 string localMessage = default;
                 (DataTable table, int linesAffected) localTable = default;
 
@@ -69,6 +70,7 @@ namespace DistributedQueryLibrary
                 catch (Exception exception)
                 {
                     localMessage = String.Concat(_queryErrorMessage, exception.Message);
+                    isSuccessful = false;
                 }
                 finally
                 {
@@ -76,7 +78,7 @@ namespace DistributedQueryLibrary
                     { 
                         step++;
                         TotalLinesAffected += localTable.linesAffected;
-                        Messages.Add(new QueryLog(localMessage, server, DateTime.Now));
+                        Messages.Add(new QueryLog(localMessage, server, DateTime.Now, isSuccessful));
                         tableResults.Merge(localTable.table ?? new DataTable());
                         queryWorker?.ReportProgress(step * 100 / servers.Count());
                     }
