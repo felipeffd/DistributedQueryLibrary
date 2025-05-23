@@ -30,7 +30,17 @@ namespace DistributedQueryLibrary
             _locker = new object();
         }
 
-        public DataTable DistributeQuery(BackgroundWorker queryWorker, string query, List<string> servers, bool addServerName = false)
+        /// <summary>
+        /// Executes a query to a list of servers.
+        /// The string connection will use the Integrated Security by default.
+        /// A list of result messages will be stored in the Messages property. 
+        /// </summary>
+        /// <param name="query">The query to be processed.</param>
+        /// <param name="servers">A list of servers to connect.</param>
+        /// <param name="queryWorker">A nullable Backgroundworker for cancellation commands and reporting results.</param>
+        /// <param name="addServerName">A flag to add or not a column showing the server name.</param>
+        /// <returns>The results in a DataTable.</returns>
+        public DataTable DistributeQuery(string query, List<string> servers, BackgroundWorker queryWorker = null, bool addServerName = false)
         {
             int step = 0;
             TotalLinesAffected = 0;
@@ -49,9 +59,8 @@ namespace DistributedQueryLibrary
 
                 try
                 {
-                    if (queryWorker != null)
-                        if (queryWorker.CancellationPending)
-                            throw new OperationCanceledException(_userCancelledMessage);
+                    if (queryWorker != null && queryWorker.CancellationPending)
+                        throw new OperationCanceledException(_userCancelledMessage);
 
                     localTable = ExecuteQuery(query, server);
 
@@ -87,7 +96,13 @@ namespace DistributedQueryLibrary
 
             return tableResults;
         }
-
+        
+        /// <summary>
+        /// Executes a query to a single server.
+        /// </summary>
+        /// <param name="query">The SQL command to be processed.</param>
+        /// <param name="server">The target server to receive the query.</param>
+        /// <returns>A tuple with the results in a DataTable, and the number of lines affected.</returns>
         public (DataTable table, int linesAffected) ExecuteQuery(string query, string server)
         {
             DataTable table = new DataTable { Locale = System.Globalization.CultureInfo.InvariantCulture };
